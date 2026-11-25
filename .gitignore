@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Spyder / IDE
+.spyproject/
+.idea/
+.vscode/
+
+# Old versions (history is kept by git)
+_old/
+
+# Third-party and project data: never commit
+PAN/*
+!PAN/.gitkeep
+OND/*
+!OND/.gitkeep
+TMY/*
+!TMY/.gitkeep
+Results/*
+!Results/.gitkeep
+
+# Commercial documents
+*.msg
+*.pdf
