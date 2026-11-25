@@ -8,7 +8,7 @@ and has been aligned to the multi-field version: same bug fixes, same loss chain
 definition of the Performance Ratio and the same Excel report.
 
 Libraries requirements:
-> PVlib == 15.2
+> PVlib == 0.16.1
 > pandas == 3.0.5
 > scipy == 1.18.0
 > timezonefinder == 8.5.2
@@ -1054,13 +1054,13 @@ def PVyield_classic (POWER, LOCATION, METEO, MMS, GROUND, MODULE, INVERTER, TRAF
 
     # compute the view factor from ground to sky in case of multiple sheds.
     # NOTE: since section 8.6.4 resolves the brightness of the ground point by point, this pitch-averaged value is no longer used by the calculation. 
-    VF_gnd_sky_multi_row = bifacial.utils.vf_ground_sky_2d_integ(surface_tilt = orientation['surface_tilt'],
+    # NOTE: since PVlib 0.16 the integral is computed analytically (parameters npoints and vectorize were removed)
+    # and the parameter surface_tilt was renamed tracker_rotation. PVlib itself passes the surface tilt here.
+    VF_gnd_sky_multi_row = bifacial.utils.vf_ground_sky_2d_integ(tracker_rotation = orientation['surface_tilt'],
                                                                  gcr = gcr,
                                                                  height = pvrow_height,
                                                                  pitch = pitch,
                                                                  max_rows = max_rows,
-                                                                 npoints = 100,
-                                                                 vectorize = True,
                                                                  )
     
     # calculate view Factor from module surface to ground, for front and back side, for both one row and multiple row case
@@ -1089,10 +1089,14 @@ def PVyield_classic (POWER, LOCATION, METEO, MMS, GROUND, MODULE, INVERTER, TRAF
     
     # compute the fraction of ground between rows that receives direct radiation, accounting for the shade of the panels.
     # NOTE: as for VF_gnd_sky_multi_row above, this pitch-averaged value is no longer used by the calculation. A copy is kept for future usages
-    fraction_gnd_direct = bifacial.utils._unshaded_ground_fraction(surface_tilt = orientation['surface_tilt'],
-                                                                   surface_azimuth = orientation['surface_azimuth'],
-                                                                   solar_zenith = solar_position['apparent_zenith'],
+    # Since PVlib 0.16 this private function takes the projected solar angle phi instead of the solar and surface angles,
+    # so phi is computed first, the same way PVlib does in bifacial.infinite_sheds
+    phi_gnd = tools.atand(bifacial.utils._solar_projection_tangent(solar_zenith = solar_position['apparent_zenith'],
                                                                    solar_azimuth = solar_position['azimuth'],
+                                                                   surface_azimuth = orientation['surface_azimuth'],
+                                                                   ))
+    fraction_gnd_direct = bifacial.utils._unshaded_ground_fraction(tracker_rotation = orientation['surface_tilt'],
+                                                                   phi = phi_gnd,
                                                                    gcr = gcr,
                                                                    )
     
