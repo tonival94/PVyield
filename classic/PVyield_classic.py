@@ -297,7 +297,10 @@ def PVyield_classic (POWER, LOCATION, METEO, MMS, GROUND, MODULE, INVERTER, TRAF
     # 3 - CREATES RESULTS DATAFRAME
     # =================================================================================================
     
-    RESULTS = pd.Series()
+    # The Series holds both numbers and the text of the spacer rows, so it must be of object dtype from the start.
+    # It is created with its first row because pandas infers the dtype of an EMPTY Series from the first value added
+    # (int64 here), and every later float or text value would then trigger an incompatible-dtype upcast
+    RESULTS = pd.Series({'GHI': 0}, dtype=object)
     
     # NOTE: the row names and the block structure are aligned to the multi-field version of PVyield, so that
     # the two loss chains can be compared side by side.
