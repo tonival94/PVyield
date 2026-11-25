@@ -2,10 +2,12 @@
 """
 MV cable sizing
 
-Python conversion of the Excel VBA module 'Get_Cable_Size_Opt' (MV_Connection_sizing___Losses_v8.xlsm).
+Python conversion of the Excel VBA module 'Get_Cable_Size_Opt' (MV_Connection_sizing___Losses_v8.xlsm),
+aligned with the AC part of the Excel version v18 (functions GetCableSizeAC, GetEnergyLossAC, ... in Excel;
+the function names of this module are unchanged).
 Computes the optimal MV cable configuration (number of triads x cross section) of a MV connection line,
 by checking both the ampacity constraint (derated cable current carrying capability) and the energy loss
-constraint (Monte Carlo simulation of the yearly energy loss along the line).
+constraint (exact expected value of the yearly energy loss along the line).
 
 @author: Antonio Vallone (-T O N I-)
 
@@ -23,10 +25,33 @@ Unit convention:
       derating tables are tabulated in [degC], and the equivalent hours stay in [h] because they only appear
       as a ratio (energy lost / energy produced), where the time unit cancels out
 
+# changes vs the v8 conversion (same corrections as the Excel file, v10 to v18):
+# 1 - GetEnergyLoss: the loss is the active (Joule) loss 3*Nt*R*L*I^2. In v8 it was dV*I with
+#     dV = I*(R*cos(phi) + X*sin(phi)): the reactive term X*sin(phi) is a voltage drop, not a dissipation, so the
+#     loss was overestimated by (R*cos(phi) + X*sin(phi)) / R, up to 1.56 (trefoil) / 1.66 (flat) on 630 mm2 Al
+# 2 - GetEnergyLoss: Pac is an apparent power [MVA], so the active energy of every hour is x*Pac*cos(phi).
+#     In v8 cos(phi) was missing from the energy balance and the loss was underestimated by a factor cos(phi)
+# 3 - GetEnergyLoss: the Monte Carlo loop is replaced by its exact expected value,
+#     loss = Ploss(Pac) / (Pac*cos(phi)) * (a + 1) / (a + b + 1), with a, b the Beta parameters. The Monte Carlo
+#     converged to the same value but added noise to the sizing. It is kept as GetEnergyLossMC for cross checks;
+#     the arguments 'iterations' and 'seed' of GetCableSizeOpt and GetEnergyLoss are kept for compatibility but
+#     no longer used
+# 4 - getk5: the in-duct grouping factor was read one position too far in the table (1 triad -> 0.81 instead of
+#     1.00, 6 triads -> 0.51, a value not in the table). Now 1 -> 1.00, 2 -> 0.81, 3 -> 0.69, 4 -> 0.62,
+#     5 -> 0.58, 6 or more -> 0.54
+# 5 - GetCableSizeOpt: with more than 6 triads (several layers) the grouping factor of every layer is computed
+#     on all the triads laid so far, so that a deeper layer accounts for the heat of the layers above
+#     (prudent approximation: the tables stop at 6 triads)
+# 6 - input check: BetaA and BetaB are no longer limited to 1 (bell shaped fits are valid). MaxEloss, Cosphi,
+#     BetaA and BetaB equal to 0 are rejected (they caused a division by zero or an invalid distribution)
+#
+# known limitations:
+# - R is the max conductor resistance at 90 degC, used for every hour: conservative (roughly +10/15% on the loss)
+# - sheath / screen losses of single core cables, charging current and dielectric losses are not modelled
+# - the mutual heating between layers of triads is only approximated (see change 5)
+#
 # improvements for next versions:
-# 1 - GetEnergyLoss models the energy loss as dV*I with dV = I*(R*cos(phi) + X*sin(phi)). The reactive term
-#     X*sin(phi) is a voltage drop, not a power dissipation, so the loss is overestimated. Kept as per VBA
-# 2 - add the sizing of DC systems, through a 'System' argument switching between 'ac' and 'dc'. On hold until
+# 1 - add the sizing of DC systems, through a 'System' argument switching between 'ac' and 'dc'. On hold until
 #     the DC cable datasheets are available. In DC there is no cos(phi), no reactance and no square root of 3,
 #     so the formulas become dV = 2*R*L*I (pole to pole, both conductors in series along the path) and
 #     Ploss = 2*N*R*L*I*I, with I = P/V and one circuit made of two conductors instead of a triad of three.
@@ -284,8 +309,8 @@ _K4_FACTOR = {('trefoil', 'mono'): np.array([[1.00, 1.00, 1.00],
               }
 _K4_MAX_TRIADS = 6              # [-] the grouping tables are tabulated up to 6 triads laid at the same depth
 
-# k5 - grouping derating factor for cables laid in a duct
-_K5_SIX_TRIADS = 0.51           # [-] derating factor for exactly 6 triads laid in a duct
+# k5 - grouping derating factor for cables laid in a duct: it is read from the touching multi core trefoil row
+# of the k4 table (same values: 1 -> 1.00, 2 -> 0.81, 3 -> 0.69, 4 -> 0.62, 5 -> 0.58, 6 -> 0.54), see getk5
 
 _MAX_TRENCH_DEPTH = 3.0         # [m] deepest trench covered by the k2 derating table
 
@@ -335,7 +360,9 @@ def GetCableSizeOpt(Pdc,
 
     For every allowed cross section, two independent constraints are evaluated:
         - ampacity: how many triads are needed so that the derated ampacity of the cable covers the max line
-          current. Up to 6 triads can be laid at the same depth, further triads are pushed one metre deeper
+          current. Up to 6 triads can be laid at the same depth, further triads are pushed one metre deeper.
+          The grouping factor of a deeper layer is computed on all the triads laid so far (prudent approximation
+          of the mutual heating between layers)
         - energy loss: how many triads are needed so that the yearly energy loss along the line stays below
           the admissible one. Since the loss scales with the inverse of the number of triads, it is computed
           once on a trial configuration and then rescaled
@@ -357,7 +384,7 @@ def GetCableSizeOpt(Pdc,
         GroundT (float):      [degC] ground temperature. Default 30
         Depth (float):        [m] trench depth. Default 0.8
         Spacing (float):      [m] spacing between two adjacent cable triads. Default 0.15
-        Duct (bool):          [-] True if the cables are laid inside a duct. Default True
+        Duct (bool):          [-] True if the cables are laid inside a duct. Default False
         MaxLoading (float):   [-] max loading allowed on the cable, as a safety margin against the short
                                   circuit current, which the derating factors do not account for. Default 0.8
         BetaA (float):        [-] alpha parameter of the Beta distribution of the plant power output. Default 0.53
@@ -373,8 +400,9 @@ def GetCableSizeOpt(Pdc,
         f400 (bool):          [-] flag: allow the use of a 400 mm2 cable, single core only. Default True
         f500 (bool):          [-] flag: allow the use of a 500 mm2 cable, single core only. Default True
         f630 (bool):          [-] flag: allow the use of a 630 mm2 cable, single core only. Default True
-        iterations (int):     [-] number of Monte Carlo runs used to smooth the energy loss estimate. Default 3
-        seed (int or None):   [-] seed of the random number generator. Default None (non reproducible run)
+        iterations (int):     [-] not used since the exact expected loss replaced the Monte Carlo. Kept for
+                                  compatibility. Default 3
+        seed (int or None):   [-] not used, see iterations. Default None
         freq (float):         [Hz] grid frequency. Default 50
 
     Returns:
@@ -415,8 +443,11 @@ def GetCableSizeOpt(Pdc,
 
         while True:
 
-            # derate the nominal ampacity for the current installation conditions, then apply the safety margin
-            derating = GetDerating(j, area, Core, Lay, SoilR, GroundT, current_depth, Spacing, Duct)    # [-] cumulative derating factor
+            # derate the nominal ampacity for the current installation conditions, then apply the safety margin.
+            # The grouping factors are computed on ALL the triads laid so far (n_triads in the layers above + j in
+            # this layer), so that a deeper layer also accounts for the heat of the layers above. Beyond 6 triads
+            # the tables hold the 6 triads factor: a prudent approximation of the mutual heating between layers
+            derating = GetDerating(n_triads + j, area, Core, Lay, SoilR, GroundT, current_depth, Spacing, Duct)   # [-] cumulative derating factor
             corrected_ampacity = derating * MaxLoading * ampacity                                       # [A] ampacity actually usable by one cable
 
             # number of triads needed to carry the outstanding line current, rounded up to the next integer
@@ -515,31 +546,37 @@ def GetEnergyLoss(Nt,
                   ):
     """
     Computes the energy lost along the connection line over the whole plant production, as a fraction of the
-    energy produced, with a Monte Carlo simulation.
+    energy produced. The result is the exact expected value of the loss, i.e. the value the Monte Carlo
+    simulation of GetEnergyLossMC converges to.
 
-    The plant power output over the year is modelled as a Beta distribution: at every hour a power level is
-    drawn from it, the resulting phase current and voltage drop are computed, and the corresponding energy
-    loss is accumulated until the energy produced matches the plant yield. The whole process is repeated
-    'iterations' times and the results are averaged, to smooth the Monte Carlo noise.
+    In every producing hour the plant delivers x*Pac [MVA], with the power level x Beta(a, b) distributed in [0, 1]:
+        - phase current of one triad:  I = x * Imax,  Imax = Pac / (sqrt(3) * V * Nt)
+        - Joule loss of the hour:      3 * Nt * R * L * I^2 = x^2 * Ploss(Pac)
+        - active energy of the hour:   x * Pac * cos(phi)
+    Summing over the producing hours, the loss fraction is the ratio of the two expected values:
+        loss = Ploss(Pac) / (Pac * cos(phi)) * E[x^2] / E[x],   E[x^2] / E[x] = (a + 1) / (a + b + 1)
+    Only the resistance dissipates energy: the reactance X takes part in the voltage drop (GetVLoss), not in the
+    loss. Pdc and EqHours cancel out, so the loss only depends on the shape of the power distribution, which
+    must therefore be fitted on a plant with a similar DC/AC ratio and mounting system.
 
     Args:
         Nt (int):             [-] number of cable triads of the connection line
         Area (float):         [mm2] cable cross section
-        Pdc (float):          [MWp] DC power. Used only for PV plants. For BESS, DC power equals AC power
-        Pac (float):          [MVA] AC power at the injection point
-        EqHours (float):      [kWh/kWp or h] plant yield (PV) or equivalent full load hours (BESS)
+        Pdc (float):          [MWp] DC power. Not used by the formula (it cancels out), kept for compatibility
+        Pac (float):          [MVA] AC apparent power at the injection point
+        EqHours (float):      [kWh/kWp or h] plant yield. Not used by the formula (it cancels out), kept for compatibility
         Lenght (float):       [km] connection line length
         V (float):            [kV] connection line rated phase-to-phase voltage
         Material (str):       [-] cable material, either 'cu'/'copper' or 'alu'/'aluminum'. Not case sensitive
         Core (str):           [-] cable construction, either 'mono' or 'multi'. Not case sensitive
         Lay (str):            [-] cable laydown method, either 'trefoil' or 'flat'. Not case sensitive
-        Cosphi (float):       [-] power factor along the connection line
+        Cosphi (float):       [-] power factor along the connection line, converts apparent into active power
         Duct (bool):          [-] True if the cables are laid inside a duct, False if directly buried
         BetaA (float):        [-] alpha parameter of the Beta distribution of the plant power output. Default 0.53
         BetaB (float):        [-] beta parameter of the Beta distribution of the plant power output. Default 0.57
-        iterations (int):     [-] number of Monte Carlo runs used to smooth the estimate. Default 3
-        seed (int or None):   [-] seed of the random number generator. Default None (non reproducible run)
-        freq (float):         [Hz] grid frequency. Default 50
+        iterations (int):     [-] not used, kept for compatibility. Default 3
+        seed (int or None):   [-] not used, kept for compatibility. Default None
+        freq (float):         [Hz] not used (the reactance does not dissipate), kept for compatibility. Default 50
 
     Returns:
         energy_loss (float):  [-] energy lost along the connection line, as a fraction in the range [0, 1]
@@ -547,65 +584,91 @@ def GetEnergyLoss(Nt,
 
     # 1 - COMPUTE THE ELECTRICAL PROPERTIES OF THE CABLE
     resistance = GetCableProp('R', Material, V, Area, Core, Lay, Duct)      # [Ohm/km] max conductor resistance at 90 degC
-    inductance = GetCableProp('L', Material, V, Area, Core, Lay, Duct)      # [mH/km] cable inductance, according to the laydown method
 
     # 2 - UNIT CONVERSION TO SI
     r_si = resistance / 1E3                                     # [Ohm/m] conductor resistance
-    l_si = inductance * 1E-6                                    # [H/m] cable inductance, from mH/km
-    x_si = 2 * np.pi * freq * l_si                              # [Ohm/m] cable inductive reactance
     length_si = Lenght * 1E3                                    # [m] connection line length
-    p_ac_si = Pac * 1E6                                         # [VA] AC power at the injection point
+    p_ac_si = Pac * 1E6                                         # [VA] AC apparent power at the injection point
+    v_si = V * 1E3                                              # [V] phase-to-phase voltage of the connection line
+
+    # 3 - JOULE LOSS AT FULL PLANT POWER
+    i_phase_max = p_ac_si / (math.sqrt(3) * v_si * Nt)          # [A] phase current of one triad at full power
+    p_loss_max = 3 * Nt * r_si * length_si * i_phase_max ** 2   # [W] Joule loss of the whole line at full power
+
+    # 4 - EXPECTED LOSS FRACTION
+    shape = (BetaA + 1) / (BetaA + BetaB + 1)                   # [-] E[x^2] / E[x] of the Beta distribution
+    return p_loss_max / (p_ac_si * Cosphi) * shape              # [-] loss over active energy produced
+
+
+def GetEnergyLossMC(Nt,
+                    Area,
+                    Pdc,
+                    Pac,
+                    EqHours,
+                    Lenght,
+                    V,
+                    Material,
+                    Core,
+                    Lay,
+                    Cosphi,
+                    Duct,
+                    BetaA=0.53,
+                    BetaB=0.57,
+                    iterations=3,
+                    seed=None,
+                    ):
+    """
+    Monte Carlo version of GetEnergyLoss, kept ONLY to cross check the exact formula. Same model: Joule loss only,
+    active energy x*Pac*cos(phi) per hour. Its result changes at every run unless a seed is given.
+
+    Args:
+        same as GetEnergyLoss. iterations (int) is the number of Monte Carlo runs averaged, seed (int or None)
+        the seed of the random number generator
+
+    Returns:
+        energy_loss (float):  [-] energy lost along the connection line, as a fraction in the range [0, 1]
+    """
+
+    # 1 - COMPUTE THE ELECTRICAL PROPERTIES OF THE CABLE
+    resistance = GetCableProp('R', Material, V, Area, Core, Lay, Duct)      # [Ohm/km] max conductor resistance at 90 degC
+
+    # 2 - UNIT CONVERSION TO SI
+    r_si = resistance / 1E3                                     # [Ohm/m] conductor resistance
+    length_si = Lenght * 1E3                                    # [m] connection line length
+    p_ac_si = Pac * 1E6                                         # [VA] AC apparent power at the injection point
     p_dc_si = Pdc * 1E6                                         # [W] DC power of the plant
     v_si = V * 1E3                                              # [V] phase-to-phase voltage of the connection line
-    sin_phi = math.sqrt(1 - Cosphi ** 2)                        # [-] reactive factor, paired with the given power factor
 
     # 3 - PRECOMPUTE THE CONSTANT PART OF THE LOSS
-    # the phase current of one triad at full plant power. During the year the actual current is this value
-    # scaled by the power level drawn from the Beta distribution
-    i_phase_max = p_ac_si / (math.sqrt(3) * v_si * Nt)           # [A] phase current of one triad at full power
+    i_phase_max = p_ac_si / (math.sqrt(3) * v_si * Nt)          # [A] phase current of one triad at full power
+    p_loss_max = 3 * Nt * r_si * length_si * i_phase_max ** 2   # [W] Joule loss of the whole line at full power
 
-    # power lost by the whole line at full plant power. The voltage drop is taken as the real part of the
-    # voltage drop phasor, since the imaginary part can be recovered by rephasing
-    p_loss_max = 3 * Nt * i_phase_max * (r_si * Cosphi + x_si * sin_phi) * length_si * i_phase_max   # [W] line loss at full power
-
-    # equivalent hours accumulated by one hour at full plant power. The AC power is measured at the injection
-    # point while the yield is referred to the DC peak power, hence the ratio
-    heq_max = Pac / Pdc                                         # [h] equivalent hours produced by one hour at full power
+    # equivalent hours accumulated by one hour at full plant power: active energy, normalised on the DC peak power
+    heq_max = Pac * Cosphi / Pdc                                # [h] equivalent hours produced by one hour at full power
 
     # 4 - RUN THE MONTE CARLO SIMULATION
     rng = np.random.default_rng(seed)                           # random number generator, seeded for reproducibility
     loss_mc = 0.0                                               # [-] accumulator of the loss over the Monte Carlo runs
 
     # first guess of how many hours are needed to reach the plant yield, with a 25% margin plus a fixed offset
-    # to make the guess robust also on very short yields
     n_hours_guess = int(np.ceil(EqHours / (heq_max * BetaA / (BetaA + BetaB)) * 1.25)) + 100     # [h] size of the sample block
 
     for _ in range(iterations):
 
-        # draw one power level per hour. Drawing directly from the Beta distribution is the same as applying
-        # the inverse Beta cumulative distribution to a uniform random variable, as the original VBA did
         power_level = rng.beta(BetaA, BetaB, n_hours_guess)                     # [-] plant power output of each hour, as a fraction of the AC power
-
-        # cumulate the equivalent hours produced, hour by hour
         heq_cumulated = np.cumsum(power_level * heq_max)                        # [h] equivalent hours accumulated up to each hour
 
         # keep drawing until the sample block is long enough to reach the plant yield
         while heq_cumulated[-1] < EqHours:
-            power_level = np.concatenate([power_level, rng.beta(BetaA, BetaB, n_hours_guess)])       # [-] extend the sample block
-            heq_cumulated = np.cumsum(power_level * heq_max)                                          # [h] recompute the cumulated hours
+            power_level = np.concatenate([power_level, rng.beta(BetaA, BetaB, n_hours_guess)])
+            heq_cumulated = np.cumsum(power_level * heq_max)
 
-        # index of the first hour that brings the cumulated production up to the plant yield. That hour is
-        # included, exactly as the original While loop did, since the check is performed before adding it
-        last_hour = int(np.searchsorted(heq_cumulated, EqHours, side='left'))   # [-] index of the last hour of the simulated year
+        # index of the hour that brings the cumulated production up to the plant yield (included)
+        last_hour = int(np.searchsorted(heq_cumulated, EqHours, side='left'))
 
-        # the loss of each hour scales with the square of the power level, so the yearly loss is the loss at
-        # full power times the sum of the squared power levels
-        energy_lost = p_loss_max * np.sum(power_level[:last_hour + 1] ** 2)     # [Wh] energy lost along the line over the simulated year
-
-        # accumulate the loss of this run, normalised on the energy produced by the plant
+        energy_lost = p_loss_max * np.sum(power_level[:last_hour + 1] ** 2)     # [Wh] energy lost over the simulated year
         loss_mc += energy_lost / (EqHours * p_dc_si)                            # [-] loss of this run, as a fraction
 
-    # average over the runs to smooth the Monte Carlo noise
     return loss_mc / iterations
 
 
@@ -997,14 +1060,11 @@ def getk5(Duct,
     if not Duct:
         return 1.0
 
-    # 6 triads, i.e. a full duct bank layer, have their own tabulated factor. More than 6 triads cannot be laid
-    # at the same depth, so the derating of a full layer is held: the factor must not grow back with Nt
-    if Nt >= _K4_MAX_TRIADS:
-        return _K5_SIX_TRIADS
-
-    # up to 5 triads, the in-duct grouping is read from the touching multi core trefoil table, shifted by one
-    # position: cables in a duct are always in contact with the duct wall, so even a single triad is derated
-    return getk4('trefoil', 0, 'multi', False, Nt + 1)
+    # the k5 table is indexed by the number of ducts, one triad per duct: 1 -> 1.00 (no grouping), 2 -> 0.81,
+    # 3 -> 0.69, 4 -> 0.62, 5 -> 0.58, 6 -> 0.54. Its values coincide with the touching multi core trefoil row of
+    # k4, so that table is read with the SAME index (v8 read it one position too far). Beyond 6 triads getk4
+    # holds the factor of a full layer, so the derating never grows back with Nt
+    return getk4('trefoil', 0, 'multi', False, Nt)
 
 
 
@@ -1067,7 +1127,7 @@ def GetCableSizeOpt_input_check(Pdc,
         GroundT (float):      [degC] ground temperature
         Depth (float):        [m] trench depth
         Spacing (float):      [m] spacing between two adjacent cable triads
-        Duct (bool):          [-] True if the cables are laid inside a duct, False if directly buried
+        Duct (bool):          [-] True if the cables are laid inside a duct, False if directly buried. Default False
         MaxLoading (float):   [-] max loading allowed on the cable. It is needed because the derating factors
                                   do not account for the short circuit current, so an extra safety margin is applied
         BetaA (float):        [-] alpha parameter of the Beta distribution of the plant power output
@@ -1122,8 +1182,20 @@ def GetCableSizeOpt_input_check(Pdc,
     Spacing = _assign_numeric(Spacing, 'MV connection: cable spacing', lo=_K4_SPACING[0], hi=_K4_SPACING[-1], standard=0.15, unit='m')                   # spacing between triads, bounded by the k4 table
     Duct = _assign_bool(Duct, 'MV connection: duct laying', standard=True, custom_msg=', thus cables are assumed to be laid in a duct')                  # duct or directly buried
     MaxLoading = _assign_numeric(MaxLoading, 'MV connection: MaxLoading', lo=0, hi=1, standard=0.8, unit='-')                                            # extra safety margin on the cable ampacity
-    BetaA = _assign_numeric(BetaA, 'MV connection: BetaA', lo=0, hi=1, standard=0.53, unit='-')                                                          # alpha parameter of the Beta distribution
-    BetaB = _assign_numeric(BetaB, 'MV connection: BetaB', lo=0, hi=1, standard=0.57, unit='-')                                                          # beta parameter of the Beta distribution
+    BetaA = _assign_numeric(BetaA, 'MV connection: BetaA', lo=0, standard=0.53, unit='-')                                                                # alpha parameter of the Beta distribution, any positive value is valid
+    BetaB = _assign_numeric(BetaB, 'MV connection: BetaB', lo=0, standard=0.57, unit='-')                                                                # beta parameter of the Beta distribution, any positive value is valid
+
+    # the range checks above accept 0, which is not valid for these four arguments: MaxEloss and Cosphi are used
+    # as denominators, and a Beta distribution needs strictly positive parameters
+    for name, value, standard, unit in (('MaxEloss', MaxEloss, 1.5, '%'), ('Cosphi', Cosphi, 0.9, '-'),
+                                        ('BetaA', BetaA, 0.53, '-'), ('BetaB', BetaB, 0.57, '-')):
+        if value == 0:
+            warnings.warn(f'Invalid MV connection: {name}. Value must be higher than 0. The simulation assumed a '
+                          f'value of {standard} {unit}')
+    MaxEloss = MaxEloss if MaxEloss > 0 else 1.5
+    Cosphi = Cosphi if Cosphi > 0 else 0.9
+    BetaA = BetaA if BetaA > 0 else 0.53
+    BetaB = BetaB if BetaB > 0 else 0.57
 
     # CABLE SIZE FLAGS - collected in a single array, ordered exactly as _VALID_MV_CABLE_SECT
     flags_in = [f50, f70, f95, f120, f150, f185, f240, f300, f400, f500, f630]
@@ -1131,7 +1203,7 @@ def GetCableSizeOpt_input_check(Pdc,
                       for flag, sect in zip(flags_in, _VALID_MV_CABLE_SECT)], dtype=bool)
 
     # MONTE CARLO AND GRID SETTINGS
-    iterations = _assign_numeric(iterations, 'MV connection: Monte Carlo iterations', lo=1, standard=3, unit='-', int_only=True)     # number of Monte Carlo runs
+    iterations = _assign_numeric(iterations, 'MV connection: Monte Carlo iterations', lo=1, standard=3, unit='-', int_only=True)     # number of Monte Carlo runs (not used by the exact loss, kept for compatibility)
     seed = _assign_numeric(seed, 'MV connection: random seed', lo=0, standard=None, unit='-', int_only=True)                         # random seed, None means a non reproducible run
     freq = _assign_numeric(freq, 'MV connection: grid frequency', lo=0, standard=50, unit='Hz')                                      # grid frequency
 
